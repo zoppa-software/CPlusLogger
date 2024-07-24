@@ -3,6 +3,8 @@
 
 #define LOG_CACHE_SIZE 256
 
+#define MAX_HISTRY_FILE 100
+
 //----------------------------------------------------------------------
 // ログ出力データ
 //----------------------------------------------------------------------
@@ -295,6 +297,11 @@ static HANDLE CreateLogFile(const char* path)
 // ログクラスを作成します。
 Logger* Logger::Create(const char* path, long maxFileSize, int genLimit)
 {
+	// 履歴世代の最大数チェック
+	if (genLimit < 0 || genLimit > MAX_HISTRY_FILE) {
+		throw LogException("ログの世代数が1～100件の範囲外です");
+	}
+
 	// ファイルを作成し末尾に移動
 	HANDLE hFile = CreateLogFile(path);
 
@@ -365,52 +372,133 @@ static const char* GetLevel(LogLevel lv)
 	}
 }
 
-// ファイル一覧を取得します。
-static void CollectFiles(const char * logPath, DWORD * fileCount, char answer[100][MAX_PATH + 1])
+/**
+ * ログファイルの履歴を収集します。
+ */
+class HistoryFile
 {
-	static WIN32_FIND_DATAA files[100];
+public:
+	// ログファイルのリスト
+	const char (*historyFiles)[MAX_PATH + 1];
 
-	char patternPath[MAX_PATH + 1] = { 0 };
-	strcpy_s(patternPath, MAX_PATH, logPath);
-	size_t strcnt = 0, extLen = 0;
-	for (const char* i = patternPath; *i; ++i) {
-		if (*i == '.') {
-			extLen = strcnt;
+	// ログファイルの数
+	DWORD historyCount;
+
+	// 新しいログファイル
+	const char * newHistoryFile;
+
+public:
+	// デフォルトコンストラクタ
+	HistoryFile() :
+		historyFiles(nullptr),
+		historyCount(0),
+		newHistoryFile(nullptr)
+	{}
+
+	// コピーコンストラクタ
+	HistoryFile(const HistoryFile& src) :
+		historyFiles(src.historyFiles),
+		historyCount(src.historyCount),
+		newHistoryFile(src.newHistoryFile)
+	{}
+
+	// 確保したメモリを解放します。
+	void Delete() {
+		if (this->historyFiles) {
+			delete[] this->historyFiles;
+			this->historyFiles = nullptr;
 		}
-		strcnt++;
+		this->historyCount = 0;
+		if (this->newHistoryFile) {
+			delete[] this->newHistoryFile;
+			this->newHistoryFile = nullptr;
+		}
 	}
-	memmove_s(patternPath + extLen + 1, MAX_PATH - extLen, patternPath + extLen, strcnt - extLen + 1);
-	patternPath[extLen] = '*';
+};
+
+
+static HistoryFile CollectFistoryFiles(const char* logPath)
+{
+	char patternPath[MAX_PATH + 1] = { 0 };
+	char* appendFile = new char[MAX_PATH + 1];
+	strcpy_s(patternPath, MAX_PATH, logPath);
+	memcpy_s(appendFile, MAX_PATH + 1, logPath, MAX_PATH + 1);
+
+	size_t filePtr = 0;
+	size_t extPtr = 0;
+	size_t strLen = 0;
+	for (const char* i = patternPath; *i; ++i, ++strLen) {
+		switch (*i)
+		{
+		case '\\':
+			filePtr = strLen;
+			break;
+		case '.':
+			extPtr = strLen;
+			break;
+		default:
+			break;
+		}
+	}
+	SYSTEMTIME lt;
+	GetLocalTime(&lt);
+	char time[18];
+	int hlen = sprintf_s(time, sizeof(time), "%04d%02d%02d%02d%02d%02d%03d",
+		lt.wYear,
+		lt.wMonth,
+		lt.wDay,
+		lt.wHour,
+		lt.wMinute,
+		lt.wSecond,
+		lt.wMilliseconds
+	);
+
+	memmove_s(patternPath + extPtr + 1, MAX_PATH - extPtr, patternPath + extPtr, strLen - extPtr + 1);
+	patternPath[extPtr] = '*';
+
+	memmove_s(appendFile + extPtr + 17, MAX_PATH - extPtr, appendFile + extPtr, strLen - extPtr + 1);
+	for (size_t i = 0; i < 17; ++i) {
+		appendFile[extPtr + i] = time[i];
+	}
+
+	WIN32_FIND_DATAA* tempFiles = new WIN32_FIND_DATAA[MAX_HISTRY_FILE];
+	memset(tempFiles, 0, sizeof(WIN32_FIND_DATAA) * MAX_HISTRY_FILE);
 
 	WIN32_FIND_DATAA win32fd;
 	HANDLE hFind = FindFirstFileA(patternPath, &win32fd);
-	DWORD count = 0;
+	DWORD historyCount = 0;
 	do {
-		files[count++] = win32fd;
+		tempFiles[historyCount++] = win32fd;
 	} while (FindNextFileA(hFind, &win32fd));
-
-	*fileCount = count;
 	FindClose(hFind);
 
-	for (size_t i = 1; i < count; ++i) {
-		int cmp = strcmp(files[i - 1].cFileName, files[i].cFileName);
+	for (size_t i = 1; i < historyCount; ++i) {
+		int cmp = strcmp(tempFiles[i - 1].cFileName, tempFiles[i].cFileName);
 
 		if (cmp > 0) {
 			size_t j = i;
-			WIN32_FIND_DATAA tmp = files[i];
+			WIN32_FIND_DATAA tmp = tempFiles[i];
 			do {
-				files[j] = files[j - 1];
+				tempFiles[j] = tempFiles[j - 1];
 				j--;
-			} while (j > 0 && strcmp(files[j - 1].cFileName, tmp.cFileName));
-			files[j] = tmp;
+			} while (j > 0 && strcmp(tempFiles[j - 1].cFileName, tmp.cFileName));
+			tempFiles[j] = tmp;
 		}
 	}
 
-	const char* ext = SplitPath(patternPath);
-	patternPath[ext - patternPath] = 0;
-	for (size_t i = 1; i < count; ++i) {
-		sprintf_s(answer[i - 1], MAX_PATH, "%s%s", patternPath, files[i].cFileName);
+	char(*historyFiles)[MAX_PATH + 1] = (char(*)[MAX_PATH + 1])new char[MAX_HISTRY_FILE * (MAX_PATH + 1)];
+	memset(historyFiles, 0, MAX_HISTRY_FILE * (MAX_PATH + 1));
+
+	patternPath[filePtr] = 0;
+	for (size_t i = 1; i < historyCount; ++i) {
+		sprintf_s(historyFiles[i - 1], MAX_PATH, "%s\\%s", patternPath, tempFiles[i].cFileName);
 	}
+
+	HistoryFile res;
+	res.historyFiles = historyFiles;
+	res.historyCount = historyCount;
+	res.newHistoryFile = appendFile;
+	return res;
 }
 
 void Logger::Log(const char* file, int line, LogLevel lv, const char* message, ...)
@@ -466,58 +554,21 @@ DWORD WINAPI Logger::LoggingThread(LPVOID loggerPtr)
 	bool writed = false;
 	do {
 		long size = GetFileSize(logger->param->hFile, NULL);
-		if (size == -1) {
-			DWORD err = GetLastError();
-			int a = 0;
-		}
+
 		if (size > logger->param->maxSize) {
-			static char files[100][MAX_PATH + 1];
-			memset(files, 0, sizeof(files));
-
-			DWORD fileCount = 0;
-			CollectFiles(logger->logPath, &fileCount, files);
-			for (int i = 0; i < (int)fileCount - logger->param->genLimit; ++i) {
-				DeleteFileA(files[i]);
+			HistoryFile finded = CollectFistoryFiles(logger->logPath);
+			for (int i = 0; i < (int)finded.historyCount - logger->param->genLimit; ++i) {
+				DeleteFileA(finded.historyFiles[i]);
 			}
 
-			char tmpPath[MAX_PATH + 1];
-			memset(tmpPath, 0, MAX_PATH + 1);
-			
-			char* dest = tmpPath;
-			size_t strcnt = 0;
-			size_t extLen = 0;
-			for (const char* i = logger->logPath; *i; ++i, ++dest) {
-				*dest = *i;
-				if (*i == '.') {
-					extLen = strcnt;
-				}
-				strcnt++;
-			}
-			if (extLen > 0) {
-				SYSTEMTIME lt;
-				GetLocalTime(&lt);
-				char time[18];
-				int hlen = sprintf_s(time, sizeof(time), "%04d%02d%02d%02d%02d%02d%03d",
-					lt.wYear,
-					lt.wMonth,
-					lt.wDay,
-					lt.wHour,
-					lt.wMinute,
-					lt.wSecond,
-					lt.wMilliseconds
-				);
-				memmove_s(tmpPath + extLen + 17, MAX_PATH - extLen, tmpPath + extLen, strcnt - extLen + 1);
-				for (size_t i = 0; i < 17; ++i) {
-					tmpPath[extLen + i] = time[i];
-				}
+			FlushFileBuffers(logger->param->hFile);
+			Sleep(500);
+			CloseHandle(logger->param->hFile);
+			MoveFileA(logger->logPath, finded.newHistoryFile);
 
-				FlushFileBuffers(logger->param->hFile);
-				Sleep(500);
-				CloseHandle(logger->param->hFile);
-				MoveFileA(logger->logPath, tmpPath);
+			logger->param->hFile = CreateLogFile(logger->logPath);
 
-				logger->param->hFile = CreateLogFile(logger->logPath);
-			}			
+			finded.Delete();	
 		}
 
 		bool needWrite = false;
