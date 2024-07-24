@@ -375,7 +375,7 @@ static const char* GetLevel(LogLevel lv)
 /**
  * ログファイルの履歴を収集します。
  */
-class HistoryFile
+class HistoryFile sealed
 {
 public:
 	// ログファイルのリスト
@@ -416,14 +416,16 @@ public:
 	}
 };
 
-
+// ログファイルの履歴を収集します。
 static HistoryFile CollectFistoryFiles(const char* logPath)
 {
+	// ログファイルのパターン、追加ファイル名を生成
 	char patternPath[MAX_PATH + 1] = { 0 };
 	char* appendFile = new char[MAX_PATH + 1];
 	strcpy_s(patternPath, MAX_PATH, logPath);
 	memcpy_s(appendFile, MAX_PATH + 1, logPath, MAX_PATH + 1);
 
+	// ファイル名、拡張子の位置を取得
 	size_t filePtr = 0;
 	size_t extPtr = 0;
 	size_t strLen = 0;
@@ -440,6 +442,12 @@ static HistoryFile CollectFistoryFiles(const char* logPath)
 			break;
 		}
 	}
+
+	// ログファイルのパターンを生成
+	memmove_s(patternPath + extPtr + 1, MAX_PATH - extPtr, patternPath + extPtr, strLen - extPtr + 1);
+	patternPath[extPtr] = '*';
+
+	// 追加ファイル名を生成
 	SYSTEMTIME lt;
 	GetLocalTime(&lt);
 	char time[18];
@@ -452,15 +460,12 @@ static HistoryFile CollectFistoryFiles(const char* logPath)
 		lt.wSecond,
 		lt.wMilliseconds
 	);
-
-	memmove_s(patternPath + extPtr + 1, MAX_PATH - extPtr, patternPath + extPtr, strLen - extPtr + 1);
-	patternPath[extPtr] = '*';
-
 	memmove_s(appendFile + extPtr + 17, MAX_PATH - extPtr, appendFile + extPtr, strLen - extPtr + 1);
 	for (size_t i = 0; i < 17; ++i) {
 		appendFile[extPtr + i] = time[i];
 	}
 
+	// 現在のログファイルを取集
 	WIN32_FIND_DATAA* tempFiles = new WIN32_FIND_DATAA[MAX_HISTRY_FILE];
 	memset(tempFiles, 0, sizeof(WIN32_FIND_DATAA) * MAX_HISTRY_FILE);
 
@@ -472,6 +477,7 @@ static HistoryFile CollectFistoryFiles(const char* logPath)
 	} while (FindNextFileA(hFind, &win32fd));
 	FindClose(hFind);
 
+	// ファイル名でソート
 	for (size_t i = 1; i < historyCount; ++i) {
 		int cmp = strcmp(tempFiles[i - 1].cFileName, tempFiles[i].cFileName);
 
@@ -486,6 +492,7 @@ static HistoryFile CollectFistoryFiles(const char* logPath)
 		}
 	}
 
+	// 履歴ファイルのリストを生成
 	char(*historyFiles)[MAX_PATH + 1] = (char(*)[MAX_PATH + 1])new char[MAX_HISTRY_FILE * (MAX_PATH + 1)];
 	memset(historyFiles, 0, MAX_HISTRY_FILE * (MAX_PATH + 1));
 
@@ -501,6 +508,14 @@ static HistoryFile CollectFistoryFiles(const char* logPath)
 	return res;
 }
 
+/**
+ * ログを出力します。
+ *
+ * @param file ファイル名
+ * @param line 行番号
+ * @param lv ログレベル
+ * @param message メッセージ
+ */
 void Logger::Log(const char* file, int line, LogLevel lv, const char* message, ...)
 {
 	va_list args;
@@ -545,6 +560,9 @@ void Logger::Log(const char* file, int line, LogLevel lv, const char* message, .
 	va_end(args);
 }
 
+/**
+ * ログ出力処理です（別スレッド）
+ */
 DWORD WINAPI Logger::LoggingThread(LPVOID loggerPtr)
 {
 	Logger* logger = (Logger*)loggerPtr;
